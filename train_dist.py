@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
 import os
+import sys
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -82,7 +84,7 @@ def partition_dataset():
             transforms.Normalize((0.1307, ), (0.3081, ))
         ]))
     size = dist.get_world_size()
-    bsz = 128 / float(size)
+    bsz = int(128 / float(size))
     partition_sizes = [1.0 / size for _ in range(size)]
     partition = DataPartitioner(dataset, partition_sizes)
     partition = partition.use(dist.get_rank())
@@ -95,7 +97,7 @@ def average_gradients(model):
     """ Gradient averaging. """
     size = float(dist.get_world_size())
     for param in model.parameters():
-        dist.all_reduce(param.grad.data, op=dist.reduce_op.SUM, group=0)
+        dist.all_reduce(param.grad.data, op=dist.reduce_op.SUM)
         param.grad.data /= size
 
 
@@ -103,8 +105,9 @@ def run(rank, size):
     """ Distributed Synchronous SGD Example """
     torch.manual_seed(1234)
     train_set, bsz = partition_dataset()
-    model = Net()
-    model = model
+    device = torch.device("cuda:{}".format(rank))
+    model = Net().to(device)
+    #model = model
 #    model = model.cuda(rank)
     optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.5)
 
@@ -112,12 +115,13 @@ def run(rank, size):
     for epoch in range(10):
         epoch_loss = 0.0
         for data, target in train_set:
-            data, target = Variable(data), Variable(target)
+            #data, target = Variable(data), Variable(target)
+            data, target = data.to(device), target.to(device)
 #            data, target = Variable(data.cuda(rank)), Variable(target.cuda(rank))
             optimizer.zero_grad()
             output = model(data)
             loss = F.nll_loss(output, target)
-            epoch_loss += loss.data[0]
+            epoch_loss += loss.item()
             loss.backward()
             average_gradients(model)
             optimizer.step()
@@ -128,9 +132,24 @@ def run(rank, size):
 
 def init_processes(rank, size, fn, backend='gloo'):
     """ Initialize the distributed environment. """
-    os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29500'
-    dist.init_process_group(backend, rank=rank, world_size=size)
+    if sys.platform == 'win32':
+        # Distributed package only covers collective communications with Gloo
+        # backend and FileStore on Windows platform. Set init_method parameter
+        # in init_process_group to a local file.
+        # Example init_method="file:///f:/libtmp/some_file"
+        init_method="file:///C:/Users/lei.cao/Documents/try_DDP"
+
+        # initialize the process group
+        dist.init_process_group(
+            backend,
+            init_method=init_method,
+            rank=rank,
+            world_size=size
+        )
+    else:
+        os.environ['MASTER_ADDR'] = '127.0.0.1'
+        os.environ['MASTER_PORT'] = '29500'
+        dist.init_process_group(backend, rank=rank, world_size=size)
     fn(rank, size)
 
 
@@ -144,3 +163,4 @@ if __name__ == "__main__":
 
     for p in processes:
         p.join()
+
